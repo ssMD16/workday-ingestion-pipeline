@@ -1,0 +1,121 @@
+# Mock Workday API
+
+A lightweight FastAPI service that mimics Workday's Reports-as-a-Service (RaaS)
+endpoints for HR pipeline development and testing. Lets you build and validate the
+full Snowflake ingestion pipeline without needing live Workday credentials.
+
+---
+
+## Setup
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Start the server
+python main.py
+# Server runs at http://localhost:8000
+```
+
+Auto-generated docs available at:
+- **Swagger UI**: http://localhost:8000/docs
+- **ReDoc**: http://localhost:8000/redoc
+
+---
+
+## Authentication
+
+All endpoints (except `/health`) use HTTP Basic Auth, mirroring Workday's
+Integration System User (ISU) model.
+
+| Field    | Value               |
+|----------|---------------------|
+| Username | `workday_svc_user`  |
+| Password | `mock_password_123` |
+
+---
+
+## Endpoints
+
+### Utility
+| Method | Path      | Description            |
+|--------|-----------|------------------------|
+| GET    | `/health` | Liveness probe (no auth) |
+
+### Employees
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/ccx/service/customreport2/{tenant}/HR_Analytics/Active_Employees` | All employees. Optional `?status=Active\|Terminated\|All` filter. |
+| GET | `/ccx/service/customreport2/{tenant}/HR_Analytics/Employee/{employee_id}` | Single employee by ID. |
+
+### Terminations
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/ccx/service/customreport2/{tenant}/HR_Analytics/Terminations` | All terminations. Supports `?start_date`, `?end_date`, `?termination_type` filters. |
+| GET | `/ccx/service/customreport2/{tenant}/HR_Analytics/Terminations/{termination_id}` | Single termination by ID. |
+
+---
+
+## Example Requests
+
+```bash
+# Health check
+curl http://localhost:8000/health
+
+# All active employees (tenant: equipmentshare)
+curl -u workday_svc_user:mock_password_123 \
+  "http://localhost:8000/ccx/service/customreport2/equipmentshare/HR_Analytics/Active_Employees?status=Active"
+
+# Terminations in a date range
+curl -u workday_svc_user:mock_password_123 \
+  "http://localhost:8000/ccx/service/customreport2/equipmentshare/HR_Analytics/Terminations?start_date=2024-01-01&end_date=2024-12-31"
+
+# Voluntary terminations only
+curl -u workday_svc_user:mock_password_123 \
+  "http://localhost:8000/ccx/service/customreport2/equipmentshare/HR_Analytics/Terminations?termination_type=Voluntary"
+```
+
+---
+
+## Response Format
+
+All endpoints return a `RaaSReport` envelope that mirrors Workday's standard JSON shape:
+
+```json
+{
+  "report_name": "Terminations",
+  "generated_at": "2025-04-01T08:00:00Z",
+  "tenant": "equipmentshare",
+  "total_records": 8,
+  "data": [ ... ]
+}
+```
+
+---
+
+## Key Termination Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `termination_id` | string | Unique ID for the termination event |
+| `employee_id` | string | FK to employee record |
+| `termination_date` | date | Official last day per Workday |
+| `last_day_of_work` | date | Actual final working day |
+| `termination_type` | string | `Voluntary` or `Involuntary` |
+| `termination_reason` | string | Standardized reason code |
+| `termination_reason_detail` | string | Free-text detail |
+| `rehire_eligible` | bool | Whether employee is eligible for rehire |
+| `recorded_by` | string | HR rep who entered the transaction |
+| `recorded_at` | string | ISO timestamp of data entry |
+
+---
+
+## File Structure
+
+```
+workday_mock_api/
+├── main.py           # FastAPI app, routes, auth
+├── fake_data.py      # Seed employees and termination records
+├── requirements.txt  # Python dependencies
+└── README.md         # This file
+```
