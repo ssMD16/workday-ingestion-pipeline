@@ -1,0 +1,189 @@
+# Workday → S3 Lambda Ingestion Pipeline
+
+Extracts employee and termination records from the Workday RaaS API and stages
+them as partitioned NDJSON files in S3. Snowflake's audit table is the single
+source of truth for incremental load state — no SSM or external state store needed.
+
+---
+
+## File Structure
+
+```
+workday_lambda/
+├── lambda_function.py          # Lambda handler — entry point, orchestrates the run
+├── workday_client.py           # HTTP client for the Mock/real Workday API
+├── s3_stager.py                # Writes raw payloads to S3 as partitioned NDJSON
+├── snowflake_state_manager.py  # Queries Snowflake audit table for state; writes run records
+├── secrets_helper.py           # Fetches Workday + Snowflake credentials from Secrets Manager
+├── requirements.txt            # Python dependencies
+└── README.md                   # This file
+```
+
+---
+
+## Architecture
+
+```
+EventBridge (nightly cron)
+    └── triggers Lambda
+            ├── SecretsHelper         → Secrets Manager (Workday + Snowflake creds)
+            ├── SnowflakeStateManager → Snowflake audit table (last successful run date)
+            ├── WorkdayClient         → Mock/Workday API (employees + terminations)
+            ├── S3Stager              → S3 (partitioned NDJSON files)
+            │                               └── Snowpipe → Snowflake raw tables
+            └── SnowflakeStateManager → Snowflake audit table (write run record)
+```
+
+---
+
+## Why Snowflake Is the State Source of Truth
+
+Incrementalstate is derived by querying the Snowflake audit table:
+
+```sql
+SELECT MAX(run_date)
+FROM   pipeline_audit.ingestion.runs
+WHERE  entity  = 'terminations'
+AND    status  = 'SUCCESS';
+```
+
+This means the pipeline's view of "what was last loaded" always reflects what
+actually made it into Snowflake — not what Lambda *thought* it loaded. If
+Snowpipe fails silently, the audit table has no SUCCESS record for that date
+and the next Lambda run will automatically re-pull the missing window.
+
+---
+
+## Audit Table DDL
+
+Run this once in Snowflake before the first pipeline execution:
+
+```sql
+CREATE DATABASE IF NOT EXISTS pipeline_audit;
+CREATE SCHEMA  IF NOT EXISTS pipeline_audit.ingestion;
+
+CREATE TABLE IF NOT EXISTS pipeline_audit.ingestion.runs (
+    run_id          VARCHAR      NOT NULL,
+    run_date        DATE         NOT NULL,
+    entity          VARCHAR      NOT NULL,
+    records_staged  INTEGER      NOT NULL,
+    s3_key          VARCHAR,
+    status          VARCHAR      NOT NULL,
+    started_at      TIMESTAMP_TZ NOT NULL,
+    completed_at    TIMESTAMP_TZ,
+    error_message   VARCHAR,
+    PRIMARY KEY (run_id)
+);
+```
+
+---
+
+## S3 Output Structure
+
+```
+s3://{bucket}/workday/raw/
+├── employees/
+│   └── year=2024/month=06/day=30/20240630T020000Z.ndjson
+└── terminations/
+    └── year=2024/month=06/day=30/20240630T020000Z.ndjson
+```
+
+Each NDJSON file:
+- **Line 1**: metadata envelope (entity, run_date, record_count, source)
+- **Lines 2–N**: one JSON object per record
+
+---
+
+## Environment Variables
+
+| Variable              | Description                                      | Example                        |
+|-----------------------|--------------------------------------------------|--------------------------------|
+| `WORKDAY_BASE_URL`    | Base URL of the Workday or Mock API              | `http://localhost:8000`        |
+| `WORKDAY_TENANT`      | Workday tenant identifier                        | `equipmentshare`               |
+| `WORKDAY_SECRET_ARN`  | Secrets Manager ARN — Workday credentials        | `arn:aws:secretsmanager:...`   |
+| `SNOWFLAKE_SECRET_ARN`| Secrets Manager ARN — Snowflake credentials      | `arn:aws:secretsmanager:...`   |
+| `S3_BUCKET`           | Target S3 bucket                                 | `equipmentshare-data-lake`     |
+| `S3_PREFIX`           | Root prefix inside the bucket                    | `workday/raw`                  |
+
+---
+
+## Secrets Manager Secret Formats
+
+**Workday secret:**
+```json
+{
+  "username": "workday_svc_user",
+  "password": "mock_password_123"
+}
+```
+
+**Snowflake secret:**
+```json
+{
+  "account":   "xy12345.us-east-1",
+  "user":      "pipeline_svc_user",
+  "password":  "snowflake_password",
+  "warehouse": "INGESTION_WH",
+  "database":  "pipeline_audit",
+  "schema":    "ingestion",
+  "role":      "PIPELINE_ROLE"
+}
+```
+
+---
+
+## Incremental Load Logic
+
+| Scenario | start_date behaviour |
+|---|---|
+| EventBridge payload contains `"start_date"` | Uses that value directly |
+| `"full_load": true` in payload | No start_date filter — pulls all records |
+| Audit table has a prior SUCCESS record | `MAX(run_date) + 1 day` |
+| No prior SUCCESS record (first run) | 30-day lookback from today |
+
+---
+
+## Required IAM Permissions (Lambda Execution Role)
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject"],
+      "Resource": "arn:aws:s3:::equipmentshare-data-lake/workday/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": "arn:aws:secretsmanager:us-east-1:*:secret:workday*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": "arn:aws:secretsmanager:us-east-1:*:secret:snowflake*"
+    }
+  ]
+}
+```
+
+---
+
+## Deployment
+
+```bash
+# 1. Install dependencies into a package directory
+pip install -r requirements.txt -t ./package/
+
+# 2. Copy source files into the package
+cp *.py ./package/
+
+# 3. Zip the package
+cd package && zip -r ../workday_ingestion.zip . && cd ..
+
+# 4. Deploy to Lambda
+aws lambda update-function-code \
+  --function-name workday-ingestion \
+  --zip-file fileb://workday_ingestion.zip
+```
