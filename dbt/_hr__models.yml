@@ -1,0 +1,252 @@
+version: 2
+
+# =============================================================================
+# _hr__models.yml
+# Column-level documentation and schema tests for HR mart models.
+# =============================================================================
+
+models:
+
+  # ---------------------------------------------------------------------------
+  # dim_employees
+  # ---------------------------------------------------------------------------
+  - name: dim_employees
+    description: >
+      Current-state employee dimension. One row per employee (active and
+      terminated). Enriched with tenure buckets, hire time attributes,
+      and manager flag. Used as the dimension in mart joins and as the
+      population source for headcount calculations.
+
+    columns:
+
+      - name: employee_key
+        description: Hashed surrogate key. Primary key of this model.
+        tests:
+          - unique
+          - not_null
+
+      - name: employee_id
+        description: Workday natural key.
+        tests:
+          - unique
+          - not_null
+
+      - name: full_name
+        description: First + last name concatenated.
+        tests:
+          - not_null
+
+      - name: employment_status
+        description: ACTIVE or TERMINATED.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['ACTIVE', 'TERMINATED']
+
+      - name: is_active
+        description: True if employment_status = ACTIVE.
+        tests:
+          - not_null
+
+      - name: hire_date
+        description: Original hire date.
+        tests:
+          - not_null
+
+      - name: location_state
+        description: State of primary work location, uppercased.
+        tests:
+          - not_null
+
+      - name: tenure_bucket
+        description: Binned tenure range at current date.
+        tests:
+          - not_null
+          - accepted_values:
+              values:
+                - '1. 0-90 days'
+                - '2. 91-365 days'
+                - '3. 1-2 years'
+                - '4. 2-5 years'
+                - '5. 5+ years'
+
+      - name: is_manager
+        description: True if any other employee lists this person as their manager.
+        tests:
+          - not_null
+
+
+  # ---------------------------------------------------------------------------
+  # fct_terminations
+  # ---------------------------------------------------------------------------
+  - name: fct_terminations
+    description: >
+      Termination fact table enriched with employee context at time of exit.
+      One row per termination event. The primary dataset for the turnover
+      dashboard — provides who left, when, why, from which location and
+      department, and after how long.
+
+    columns:
+
+      - name: termination_key
+        description: Hashed surrogate key. Primary key of this model.
+        tests:
+          - unique
+          - not_null
+
+      - name: termination_id
+        description: Workday natural key for the termination event.
+        tests:
+          - unique
+          - not_null
+
+      - name: employee_key
+        description: FK to dim_employees.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_employees')
+              field: employee_key
+
+      - name: termination_date
+        description: Official last day per Workday.
+        tests:
+          - not_null
+
+      - name: termination_type
+        description: VOLUNTARY or INVOLUNTARY.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['VOLUNTARY', 'INVOLUNTARY']
+
+      - name: termination_reason
+        description: Uppercased standardised reason code.
+        tests:
+          - not_null
+
+      - name: is_voluntary
+        description: True if termination_type = VOLUNTARY.
+        tests:
+          - not_null
+
+      - name: rehire_eligible
+        description: Boolean rehire eligibility.
+        tests:
+          - not_null
+
+      - name: tenure_at_exit_days
+        description: Days from hire_date to termination_date.
+
+      - name: tenure_at_exit_bucket
+        description: Binned tenure range at point of exit.
+        tests:
+          - not_null
+          - accepted_values:
+              values:
+                - '1. 0-90 days'
+                - '2. 91-365 days'
+                - '3. 1-2 years'
+                - '4. 2-5 years'
+                - '5. 5+ years'
+                - 'Unknown'
+
+      - name: is_regrettable
+        description: >
+          True if the termination was voluntary AND the employee had
+          2 or more years of tenure. Proxy for regrettable attrition.
+        tests:
+          - not_null
+
+      - name: location_state
+        description: State of the employee's work location at time of exit.
+
+      - name: termination_month_start
+        description: First day of the termination month. Used for time-series joins.
+        tests:
+          - not_null
+
+
+  # ---------------------------------------------------------------------------
+  # fct_turnover_rolling_12m
+  # ---------------------------------------------------------------------------
+  - name: fct_turnover_rolling_12m
+    description: >
+      12-month rolling turnover metrics by month and state.
+      One row per month per location_state. The primary model powering
+      the HR turnover dashboard.
+
+      Turnover rate formula:
+        (terminations in trailing 12 months / avg monthly headcount) × 100
+
+    columns:
+
+      - name: month_start
+        description: First day of the reporting month.
+        tests:
+          - not_null
+
+      - name: month_end
+        description: Last day of the reporting month.
+        tests:
+          - not_null
+
+      - name: location_state
+        description: State dimension. Enables geographic breakdown in the dashboard.
+        tests:
+          - not_null
+
+      - name: eom_headcount
+        description: Number of active employees at end of this month.
+        tests:
+          - not_null
+
+      - name: rolling_12m_avg_headcount
+        description: >
+          Mean of monthly end-of-month headcounts across the trailing
+          12 months. Denominator of the turnover rate calculation.
+        tests:
+          - not_null
+
+      - name: total_terminations
+        description: Terminations that occurred in this specific month.
+        tests:
+          - not_null
+
+      - name: rolling_12m_terminations
+        description: Total terminations in the trailing 12 months.
+        tests:
+          - not_null
+
+      - name: rolling_12m_turnover_rate
+        description: >
+          Rolling 12-month turnover rate as a percentage.
+          Formula: (rolling_12m_terminations / rolling_12m_avg_headcount) × 100.
+          Rounded to 2 decimal places.
+        tests:
+          - dbt_hr.is_between:
+              min_value: 0
+              max_value: "{{ var('max_expected_turnover_rate') }}"
+
+      - name: rolling_12m_voluntary_rate
+        description: Rolling 12-month voluntary turnover rate (%).
+
+      - name: rolling_12m_involuntary_rate
+        description: Rolling 12-month involuntary turnover rate (%).
+
+      - name: rolling_12m_regrettable_rate
+        description: >
+          Rolling 12-month regrettable turnover rate (%).
+          Regrettable = voluntary exit after 2+ years of tenure.
+
+      - name: is_partial_window
+        description: >
+          True if fewer than 12 months of history are available for this row.
+          Dashboards should visually distinguish partial window rows.
+        tests:
+          - not_null
+
+      - name: months_in_window
+        description: Number of months included in the rolling window (max 12).
+        tests:
+          - not_null

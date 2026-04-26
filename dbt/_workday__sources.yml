@@ -1,0 +1,106 @@
+version: 2
+
+# =============================================================================
+# _workday__sources.yml
+# Declares the RAW_HR.RAW tables as dbt sources.
+#
+# Why declare sources?
+#   - dbt tracks lineage from source tables through staging and mart models,
+#     producing a full data lineage graph visible in dbt docs.
+#   - Source freshness checks alert the team if Snowpipe stops loading data
+#     (e.g. the Lambda failed silently or S3 event notifications broke).
+#   - The ref() / source() distinction makes it explicit which models read
+#     from raw tables (staging only) vs. from other dbt models (marts).
+# =============================================================================
+
+sources:
+  - name: workday_raw
+    description: >
+      Raw HR data ingested from the Workday RaaS API via Lambda + Snowpipe.
+      Tables contain one row per source record with no transformations applied.
+      Pipeline metadata columns (_pipeline_*) are added by the Lambda stager.
+    database: RAW_HR
+    schema:   RAW
+
+    # -------------------------------------------------------------------------
+    # Source freshness — alert if raw tables have not been updated recently.
+    # The Lambda runs nightly, so data should never be more than 25 hours old.
+    # warn_after fires a warning; error_after marks the source check as failed.
+    # -------------------------------------------------------------------------
+    freshness:
+      warn_after:  {count: 25, period: hour}
+      error_after: {count: 48, period: hour}
+
+    tables:
+
+      - name: raw_employees
+        description: >
+          Full snapshot of all Workday employee records loaded nightly.
+          Each run appends a new snapshot — deduplication to the latest
+          version per employee happens in stg_workday__employees.
+        loaded_at_field: _PIPELINE_WRITTEN_AT
+
+        columns:
+          - name: EMPLOYEE_ID
+            description: Workday employee identifier (e.g. EMP-1001).
+          - name: FIRST_NAME
+            description: Employee first name.
+          - name: LAST_NAME
+            description: Employee last name.
+          - name: EMAIL
+            description: Work email address.
+          - name: JOB_TITLE
+            description: Current job title in Workday.
+          - name: DEPARTMENT
+            description: Department the employee belongs to.
+          - name: LOCATION_CITY
+            description: City of the primary work location.
+          - name: LOCATION_STATE
+            description: State / province of the primary work location.
+          - name: LOCATION_COUNTRY
+            description: Country of the primary work location.
+          - name: HIRE_DATE
+            description: Original hire date.
+          - name: EMPLOYMENT_STATUS
+            description: Active or Terminated.
+          - name: WORKER_TYPE
+            description: Employee or Contractor.
+          - name: MANAGER_ID
+            description: Employee ID of the direct manager. Nullable.
+          - name: _PIPELINE_RUN_DATE
+            description: Date the Lambda run that produced this row executed.
+          - name: _LOADED_AT
+            description: UTC timestamp Snowpipe inserted this row.
+
+      - name: raw_terminations
+        description: >
+          Incremental termination events appended by Snowpipe.
+          Each row represents one employee termination transaction as
+          entered into Workday by an HR representative.
+        loaded_at_field: _PIPELINE_WRITTEN_AT
+
+        columns:
+          - name: TERMINATION_ID
+            description: Unique identifier for the termination event.
+          - name: EMPLOYEE_ID
+            description: FK to the terminated employee.
+          - name: TERMINATION_DATE
+            description: Official last day per Workday.
+          - name: LAST_DAY_OF_WORK
+            description: Actual final working day.
+          - name: TERMINATION_TYPE
+            description: Voluntary or Involuntary.
+          - name: TERMINATION_REASON
+            description: Standardised reason code (e.g. Resignation, Layoff).
+          - name: TERMINATION_REASON_DETAIL
+            description: Free-text detail entered by HR.
+          - name: REHIRE_ELIGIBLE
+            description: Whether the employee is eligible for rehire.
+          - name: RECORDED_BY
+            description: HR rep who entered the termination in Workday.
+          - name: RECORDED_AT
+            description: Timestamp the transaction was entered in Workday.
+          - name: _PIPELINE_RUN_DATE
+            description: Date the Lambda run that produced this row executed.
+          - name: _LOADED_AT
+            description: UTC timestamp Snowpipe inserted this row.

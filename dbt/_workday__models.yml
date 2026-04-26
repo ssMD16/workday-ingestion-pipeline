@@ -1,0 +1,229 @@
+version: 2
+
+# =============================================================================
+# _workday__models.yml
+# Column-level documentation and schema tests for staging models.
+#
+# Test strategy at the staging layer:
+#   - unique + not_null on primary keys: catches duplicates that slipped
+#     through the deduplication CTE and null PKs that would break joins
+#   - accepted_values on controlled vocabulary columns: catches Workday adding
+#     a new status or type that the pipeline hasn't accounted for
+#   - not_null on critical foreign keys and date fields: ensures mart models
+#     receive complete data for turnover calculations
+#   - relationships: validates every termination employee_id exists in employees
+#
+# Heavier data quality tests (row counts, anomaly detection) belong in
+# Step 6 (dbt tests) as singular tests or dbt-expectations assertions.
+# =============================================================================
+
+models:
+
+  # ---------------------------------------------------------------------------
+  # stg_workday__employees
+  # ---------------------------------------------------------------------------
+  - name: stg_workday__employees
+    description: >
+      Cleaned and deduplicated employee records from Workday.
+      One row per employee reflecting the most recent nightly snapshot.
+      Source: RAW_HR.RAW.RAW_EMPLOYEES.
+
+    columns:
+
+      - name: employee_key
+        description: Hashed surrogate key on employee_id. Primary key of this model.
+        tests:
+          - unique
+          - not_null
+
+      - name: employee_id
+        description: Workday natural key for the employee (e.g. EMP-1001).
+        tests:
+          - unique
+          - not_null
+
+      - name: first_name
+        description: Employee first name, trimmed.
+        tests:
+          - not_null
+
+      - name: last_name
+        description: Employee last name, trimmed.
+        tests:
+          - not_null
+
+      - name: full_name
+        description: Concatenation of first_name and last_name.
+        tests:
+          - not_null
+
+      - name: email
+        description: Work email address, lowercased.
+
+      - name: job_title
+        description: Current job title in Workday.
+
+      - name: department
+        description: Department the employee belongs to.
+
+      - name: location_city
+        description: City of primary work location, uppercased.
+
+      - name: location_state
+        description: State / province of primary work location, uppercased.
+        tests:
+          - not_null
+
+      - name: location_country
+        description: Country of primary work location, uppercased.
+        tests:
+          - not_null
+
+      - name: hire_date
+        description: Original hire date.
+        tests:
+          - not_null
+          - dbt_hr.not_in_future
+
+      - name: employment_status
+        description: Uppercased employment status.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['ACTIVE', 'TERMINATED']
+
+      - name: worker_type
+        description: Uppercased worker classification.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['EMPLOYEE', 'CONTRACTOR']
+
+      - name: manager_id
+        description: Employee ID of the direct manager. Nullable for top-level executives.
+
+      - name: is_active
+        description: True if employment_status = ACTIVE.
+        tests:
+          - not_null
+
+      - name: tenure_days
+        description: Days between hire_date and today. Null if hire_date is missing.
+
+      - name: snapshot_date
+        description: The _pipeline_run_date of the source row used for this record.
+        tests:
+          - not_null
+
+
+  # ---------------------------------------------------------------------------
+  # stg_workday__terminations
+  # ---------------------------------------------------------------------------
+  - name: stg_workday__terminations
+    description: >
+      Cleaned and deduplicated termination events from Workday.
+      One row per termination event. Incrementally appended.
+      Source: RAW_HR.RAW.RAW_TERMINATIONS.
+
+    columns:
+
+      - name: termination_key
+        description: Hashed surrogate key on termination_id. Primary key of this model.
+        tests:
+          - unique
+          - not_null
+
+      - name: employee_key
+        description: >
+          Hashed surrogate key on employee_id.
+          Foreign key to stg_workday__employees.employee_key.
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_workday__employees')
+              field: employee_key
+
+      - name: termination_id
+        description: Workday natural key for the termination event.
+        tests:
+          - unique
+          - not_null
+
+      - name: employee_id
+        description: Workday natural key for the terminated employee.
+        tests:
+          - not_null
+
+      - name: termination_date
+        description: Official last day per Workday.
+        tests:
+          - not_null
+          - dbt_hr.not_in_future
+          - dbt_hr.not_before_column:
+              reference_column: hire_date
+
+      - name: last_day_of_work
+        description: Actual final working day.
+
+      - name: termination_type
+        description: Uppercased termination classification.
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['VOLUNTARY', 'INVOLUNTARY']
+
+      - name: termination_reason
+        description: Uppercased standardised reason code.
+        tests:
+          - not_null
+          - accepted_values:
+              values:
+                - 'RESIGNATION'
+                - 'RETIREMENT'
+                - 'LAYOFF'
+                - 'PERFORMANCE'
+                - 'TERMINATION FOR CAUSE'
+
+      - name: termination_reason_detail
+        description: Free-text sub-reason entered by HR.
+
+      - name: rehire_eligible
+        description: Boolean — whether the employee is eligible for rehire.
+        tests:
+          - not_null
+
+      - name: recorded_by
+        description: HR rep who entered the termination in Workday.
+
+      - name: recorded_at
+        description: Timestamp the transaction was entered in Workday.
+
+      - name: is_voluntary
+        description: True if termination_type = VOLUNTARY.
+        tests:
+          - not_null
+
+      - name: notice_period_days
+        description: >
+          Days between last_day_of_work and termination_date.
+          Positive = notice period served. Zero = same-day. Negative = flags data issue.
+
+      - name: termination_year
+        description: Calendar year of the termination date.
+        tests:
+          - not_null
+
+      - name: termination_month
+        description: Calendar month of the termination date (1–12).
+        tests:
+          - not_null
+
+      - name: termination_month_start
+        description: First day of the termination month. Used for time-series grouping in mart models.
+        tests:
+          - not_null
+
+      - name: snapshot_date
+        description: The _pipeline_run_date of the source row used for this record.
+        tests:
+          - not_null
