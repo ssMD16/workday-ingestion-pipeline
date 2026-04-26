@@ -1,0 +1,81 @@
+name:    'dbt_hr'
+version: '1.0.0'
+config-version: 2
+
+# Snowflake profile defined in profiles.yml
+profile: 'dbt_hr'
+
+# Model file paths
+model-paths:    ["models"]
+test-paths:     ["tests"]
+seed-paths:     ["seeds"]
+macro-paths:    ["macros"]
+snapshot-paths: ["snapshots"]
+
+# Build artefacts
+target-path:  "target"
+clean-targets: ["target", "dbt_packages"]
+
+
+# ---------------------------------------------------------------------------
+# Model materialisation defaults by layer
+# ---------------------------------------------------------------------------
+models:
+  dbt_hr:
+
+    staging:
+      +materialized: view
+      +schema: staging
+
+      workday:
+        +tags: ['workday', 'staging']
+
+    marts:
+      +materialized: table
+      +schema: marts
+
+      hr:
+        +tags: ['hr', 'marts']
+
+
+# ---------------------------------------------------------------------------
+# Test severity configuration
+#
+# Severity controls what happens when a test fails:
+#   error — dbt run fails, CI/CD pipeline blocks, alerts fire
+#   warn  — test failure is logged but the run continues
+#
+# Strategy:
+#   - PK integrity, referential integrity, and business logic violations
+#     that would corrupt dashboard metrics → error
+#   - Freshness checks and anomaly bounds that may spike temporarily
+#     but are not always actionable immediately → warn
+# ---------------------------------------------------------------------------
+tests:
+  dbt_hr:
+
+    staging:
+      workday:
+        # Uniqueness and not_null on PKs are hard errors —
+        # duplicate or null keys break every downstream join
+        +severity: error
+
+    marts:
+      hr:
+        +severity: error
+
+        # Turnover rate bounds are anomaly detection — warn rather than
+        # block so analysts can investigate without halting the pipeline
+        fct_turnover_rolling_12m:
+          +severity: warn
+
+
+# ---------------------------------------------------------------------------
+# Global variable defaults
+# ---------------------------------------------------------------------------
+vars:
+  rolling_months: 12
+
+  # Upper bound for turnover rate anomaly detection test.
+  # Any state with a rolling rate above this is flagged as a warning.
+  max_expected_turnover_rate: 150
